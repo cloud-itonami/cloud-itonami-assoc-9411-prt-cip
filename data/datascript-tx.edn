@@ -1,0 +1,28 @@
+;; data/datascript-tx.edn — DataScript tx-data derived from src/association/facts.cljc
+;; `association.facts/catalog` (ADR-2607141700 Wave 0). Same shape as sibling files.
+;;
+;; Uses the "cip-prt" slug (not bare "cip") to disambiguate from Ecuador's
+;; unrelated cloud-itonami-assoc-9411-ecu-cip, which already occupies "cip".
+
+[#:association-rule{:id "cip-prt.founding-1974-05"
+                     :title "Confederação da Indústria Portuguesa (CIP's original name) founded May 1974"
+                     :association "cip-prt"
+                     :isic "9411"
+                     :country "PRT"
+                     :kind :governance-program
+                     :url "https://cip.org.pt/en/history/"
+                     :url-provenance :official-cip-org-pt
+                     :established-date "1974-05"
+                     :retrieved-at "2026-07-18"
+                     :topic [:governance]}
+ #:association-rule{:id "cip-prt.renamed-2010"
+                     :title "Organization established as today's CIP - Confederação Empresarial de Portugal (Confederation of Portuguese Business) in 2010"
+                     :association "cip-prt"
+                     :isic "9411"
+                     :country "PRT"
+                     :kind :governance-program
+                     :url "https://cip.org.pt/en/history/"
+                     :url-provenance :official-cip-org-pt
+                     :established-date "2010"
+                     :retrieved-at "2026-07-18"
+                     :topic [:governance]}]

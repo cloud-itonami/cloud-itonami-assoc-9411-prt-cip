@@ -13,6 +13,7 @@
   below compares against that written order rather than against `seq` on a set,
   which is not stable to rely on."
   (:require [clojure.test :refer [deftest is testing]]
+            [clojure.edn :as edn]
             [association.facts :as facts]
             [kotoba.compiler.core :as compiler]
             [kotoba.kir :as ir]))
@@ -25,16 +26,22 @@
 (def ^:private slug "cip-prt")
 (def ^:private fields
   ["id" "title" "association" "isic" "country" "kind" "url" "url-provenance"
-   "established-date" "retrieved-at"])
+   "source-quote" "corroborating-url" "corroborating-provenance"
+   "corroborating-quote" "established-date" "date-basis"
+   "date-not-narrowed-because" "date-unknown-because" "retrieved-at"])
 (def ^:private kw->field
-  {"id" :association-rule/id "title" :association-rule/title
-   "association" :association-rule/association "isic" :association-rule/isic
-   "country" :association-rule/country "kind" :association-rule/kind
-   "url" :association-rule/url "url-provenance" :association-rule/url-provenance
-   "established-date" :association-rule/established-date
-   "retrieved-at" :association-rule/retrieved-at})
+  (into {} (map (juxt identity #(keyword "association-rule" %))) fields))
 (def ^:private entries (vec (facts/spec-basis slug)))
-(def ^:private topic-order [["governance"] ["governance"]])
+
+;; The written order of `:topic`, taken from the file the port is generated
+;; from rather than retyped here. A hand-maintained copy of this list is a
+;; constant that has to be edited every time the catalog grows, and the edit
+;; that keeps the suite green is the one that stops it checking -- while
+;; reading it from the data still discriminates, because the assertions below
+;; compare the port's answers position by position against the .cljc's set.
+(def ^:private topic-order
+  (mapv #(mapv name (:association-rule/topic %))
+        (edn/read-string (slurp "data/datascript-tx.edn"))))
 
 (deftest the-fixture-reads-a-real-catalog
   ;; An empty catalog compares equal to an empty port.

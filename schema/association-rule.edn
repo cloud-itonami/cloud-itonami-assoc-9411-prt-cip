@@ -17,6 +17,25 @@
  :association-rule/kind {:db/index true}
  :association-rule/url {}
  :association-rule/url-provenance {:db/index true}
+ ;; The verbatim span at :url that the entry rests on. Not indexed: it is
+ ;; evidence to be read against the source, not a key to query by.
+ :association-rule/source-quote {}
+ ;; A second, independent source stating the same fact. Carried separately
+ ;; rather than folded into :url, so that a precision only the corroborating
+ ;; source gives (the founding month, the 1999 honour's day) is never
+ ;; attributed to the primary page.
+ :association-rule/corroborating-url {}
+ :association-rule/corroborating-provenance {:db/index true}
+ :association-rule/corroborating-quote {}
+ ;; Where the recorded date is supposed to be readable from. Indexed because
+ ;; "which of these dates rests on a heading rather than a sentence" is a
+ ;; question worth asking across the federation.
+ :association-rule/date-basis {:db/index true}
+ ;; Why a date was left coarser than the sources appear to allow, and why an
+ ;; entry carries no date at all. Both exist so that an honestly-absent date
+ ;; and a forgotten one do not look alike.
+ :association-rule/date-not-narrowed-because {}
+ :association-rule/date-unknown-because {}
  :association-rule/established-date {}
  :association-rule/last-revised-date {}
  :association-rule/retrieved-at {}

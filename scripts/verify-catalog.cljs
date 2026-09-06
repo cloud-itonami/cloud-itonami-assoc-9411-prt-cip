@@ -1,0 +1,379 @@
+#!/usr/bin/env nbb
+;; scripts/verify-catalog.cljs — check the CIP-PRT catalog against its sources.
+;;
+;;   nbb scripts/verify-catalog.cljs            structural only (offline)
+;;   nbb scripts/verify-catalog.cljs --live     also fetch every citation, and
+;;                                              require every quote and every
+;;                                              recorded date to be in it
+;;
+;; Ported from cloud-itonami-assoc-9411-gbr-cbi, with the date reader rewritten
+;; for how THESE sources write dates: cip.org.pt is a timeline whose dates are
+;; year HEADINGS standing outside the sentence, and the corroborating source is
+;; Portuguese ("A 9 de Junho de 1999"), not English.
+;;
+;; Exit codes are three-valued on purpose:
+;;
+;;   0  checked, nothing wrong
+;;   1  checked, findings printed
+;;   2  REFUSED -- could not check. Not 0, because "I could not read the
+;;      sources" and "I read them and they were fine" must not leave the same
+;;      trace, and not 1, because there is no finding to act on.
+;;
+;; Why :source-quote exists at all: reachability is not support. A URL that
+;; answers 200 and no longer contains the claim looks exactly like one that
+;; does, so a citation can rot with nothing to show for it. --live does not ask
+;; whether the citation resolves; it asks whether the document still says the
+;; thing the entry says it says.
+;;
+;; Why the date is checked separately: a quote being present is still not
+;; support for THIS entry. cip.org.pt prints its dates as year headings -- the
+;; sentence "Opening of CIP's delegation in Porto." carries no date at all, and
+;; would sit equally happily under 1976 or under 1984. So a wrong
+;; :established-date -- a transcription slip, or a year carried over from the
+;; neighbouring paragraph -- would leave the quote check green. For a
+;; :timeline-year-heading entry this check finds the NEAREST YEAR PRECEDING the
+;; quote in the document and requires it to be the year recorded, which is
+;; exactly how a reader assigns a timeline line to its heading.
+;;
+;; Why :url-provenance is checked against the host: the keyword asserts WHO is
+;; speaking, and only the URL's host can corroborate it. It matters because
+;; this catalog mixes four voices -- CIP about itself, the statutory social-
+;; concertation body, the European peak body, and an encyclopaedia -- and
+;; nothing else stops a third-party page from quietly acquiring first-party
+;; authority.
+
+(ns verify-catalog
+  (:require [clojure.edn :as edn]
+            [clojure.string :as str]
+            ["fs" :as fs]
+            ["os" :as os]
+            ["path" :as path]
+            ["child_process" :as cp]))
+
+;; process.argv holds this script's own path. Dropping a fixed count gets it
+;; wrong the moment the launcher changes, and the symptom is that the script
+;; path becomes the catalog path -- which this script then reports as
+;; unreadable, i.e. a refusal that looks like a broken catalog.
+(def argv (vec (remove #(str/ends-with? % "verify-catalog.cljs")
+                       (drop 2 (js->clj (.-argv js/process))))))
+(def live? (some #{"--live"} argv))
+(def data-path
+  (or (first (remove #(str/starts-with? % "--") argv)) "data/datascript-tx.edn"))
+
+(def ASSOCIATION "cip-prt")
+(def ISIC "9411")
+(def COUNTRY "PRT")
+
+;; A provenance keyword names WHO is speaking. The host is the only thing in
+;; the entry that can corroborate it, so the two are declared together and an
+;; unlisted keyword is a finding rather than a pass -- a new source has to say
+;; whose site it is instead of inheriting authority for free.
+(def provenance->host
+  {:official-cip-org-pt          "cip.org.pt"
+   :pt-social-concertation-body  "ces.pt"
+   :peak-body-businesseurope     "businesseurope.eu"
+   :wikipedia-corroborated       "wikipedia.org"})
+
+;; How the recorded date is supposed to be readable off the page. cip.org.pt is
+;; a timeline: the year is a HEADING standing outside the sentence, so a line
+;; that names a day ("February 19th, constitution of ...") still gets its year
+;; from above it. That mixed case needs its own name -- calling it :in-quote
+;; asserts the year is in the span, and it is not.
+(def date-bases #{:in-quote :in-quote-under-year-heading
+                  :timeline-year-heading :corroborating-quote})
+
+;; Bases whose year is the timeline heading above the quote rather than text
+;; inside it.
+(def heading-year-bases #{:timeline-year-heading :in-quote-under-year-heading})
+
+(def en-months ["january" "february" "march" "april" "may" "june"
+                "july" "august" "september" "october" "november" "december"])
+;; The corroborating source is Portuguese and writes months in words, sometimes
+;; capitalised mid-sentence ("A 9 de Junho de 1999"). Matching is done lowercased.
+(def pt-months ["janeiro" "fevereiro" "março" "abril" "maio" "junho"
+                "julho" "agosto" "setembro" "outubro" "novembro" "dezembro"])
+
+(defn refuse! [msg]
+  (println (str "REFUSED: " msg))
+  (println "Refusing to report a pass on a catalog this run could not read.")
+  (.exit js/process 2))
+
+(defn- read-catalog []
+  (let [txt (try (fs/readFileSync data-path "utf8")
+                 (catch :default e (refuse! (str data-path ": " (.-message e)))))
+        data (try (edn/read-string txt)
+                  (catch :default e (refuse! (str data-path " is not readable EDN: "
+                                                 (.-message e)))))]
+    (when-not (vector? data)
+      (refuse! (str data-path " is not a vector of entries")))
+    ;; An empty catalog satisfies every check below by having nothing to check.
+    (when (empty? data) (refuse! (str data-path " holds no entries")))
+    [txt data]))
+
+(defn- host-of [u]
+  (when-let [m (re-find #"^https?://([^/]+)" (str u))] (str/lower-case (second m))))
+
+(defn- host-matches? [host suffix]
+  (and host (or (= host suffix) (str/ends-with? host (str "." suffix)))))
+
+;; ---------------------------------------------------------------- structural
+
+(def required
+  [:association-rule/id :association-rule/title :association-rule/association
+   :association-rule/isic :association-rule/country :association-rule/kind
+   :association-rule/url :association-rule/url-provenance
+   :association-rule/source-quote :association-rule/retrieved-at
+   :association-rule/topic])
+
+(defn- structural [data]
+  (let [ids (map :association-rule/id data)]
+    (concat
+     (for [[id n] (frequencies ids) :when (> n 1)]
+       [:duplicate-id (str id " appears " n " times")])
+     (mapcat
+      (fn [e]
+        (let [id (or (:association-rule/id e) "(no :id)")
+              q (:association-rule/source-quote e)
+              date (:association-rule/established-date e)
+              basis (:association-rule/date-basis e)
+              curl (:association-rule/corroborating-url e)
+              cprov (:association-rule/corroborating-provenance e)
+              cquote (:association-rule/corroborating-quote e)
+              prov (:association-rule/url-provenance e)]
+          (concat
+           (for [k required :when (nil? (get e k))]
+             [:missing-field (str id " has no " k)])
+           (when-not (= ASSOCIATION (:association-rule/association e))
+             [[:wrong-association (str id " is not " ASSOCIATION)]])
+           (when-not (= ISIC (:association-rule/isic e))
+             [[:wrong-isic (str id " is not ISIC " ISIC)]])
+           (when-not (= COUNTRY (:association-rule/country e))
+             [[:wrong-country (str id " is not " COUNTRY)]])
+           (when (and id (not (str/starts-with? (str id) (str ASSOCIATION "."))))
+             [[:unprefixed-id (str id " does not begin with " ASSOCIATION ".")]])
+           ;; The port carries every quote as a Kotoba string literal. A
+           ;; backslash would need an escape rule no source here has exercised.
+           (when (and q (str/includes? (str q) "\\"))
+             [[:unportable-quote (str id ": :source-quote contains a backslash")]])
+           (when (and q (< (count (str q)) 12))
+             [[:quote-too-short
+               (str id ": :source-quote is " (count (str q)) " chars; a span that "
+                    "short can be found on a page that is not serving the claim")]])
+           (when (and prov (not (contains? provenance->host prov)))
+             [[:unknown-provenance
+               (str id ": " prov " is not declared in provenance->host, so nothing "
+                    "says whose site it is")]])
+           (when-let [want (get provenance->host prov)]
+             (when-not (host-matches? (host-of (:association-rule/url e)) want)
+               [[:provenance-host-mismatch
+                 (str id ": " prov " claims " want " but :url is on "
+                      (host-of (:association-rule/url e)))]]))
+           ;; Corroboration is all three fields or none. Two of three is a
+           ;; citation this script cannot check but a reader would believe.
+           (let [present (remove nil? [curl cprov cquote])]
+             (when (and (seq present) (not= 3 (count present)))
+               [[:partial-corroboration
+                 (str id ": has " (count present) " of the 3 corroborating fields "
+                      "(:corroborating-url/-provenance/-quote)")]]))
+           (when cprov
+             (when-not (contains? provenance->host cprov)
+               [[:unknown-provenance (str id ": corroborating " cprov " is undeclared)")]]))
+           (when-let [want (get provenance->host cprov)]
+             (when-not (host-matches? (host-of curl) want)
+               [[:provenance-host-mismatch
+                 (str id ": corroborating " cprov " claims " want " but :corroborating-url "
+                      "is on " (host-of curl))]]))
+           ;; A dated entry must say where the date comes from; an undated one
+           ;; must say why it has none. Silence in either direction is how an
+           ;; invented date and an honestly-absent one come to look alike.
+           (when (and date (nil? basis))
+             [[:date-without-basis (str id " records " date " but no :date-basis")]])
+           (when (and (nil? date) (nil? (:association-rule/date-unknown-because e)))
+             [[:undated-without-reason
+               (str id " has no :established-date and no :date-unknown-because")]])
+           (when (and date (not (re-matches #"\d{4}(-\d{2}(-\d{2})?)?" (str date))))
+             [[:malformed-date (str id ": " date " is not YYYY, YYYY-MM or YYYY-MM-DD")]])
+           (when (and basis (not (contains? date-bases basis)))
+             [[:unknown-date-basis (str id ": :date-basis " basis " is not one of " date-bases)]])
+           (when (and (= :corroborating-quote basis) (nil? cquote))
+             [[:date-basis-without-source
+               (str id ": :date-basis is :corroborating-quote but there is no "
+                    ":corroborating-quote to read it out of")]]))))
+      data))))
+
+;; ---------------------------------------------------------------------- live
+
+(def ua "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36")
+
+(defn- have? [bin]
+  (try (cp/execFileSync "sh" #js ["-c" (str "command -v " bin)] #js {:stdio "ignore"}) true
+       (catch :default _ false)))
+
+;; Named entities this decoder knows. Deliberately not the whole HTML5 table:
+;; what matters is the punctuation THESE sources are made of -- cip.org.pt
+;; writes a curly apostrophe in "CIP's delegation" and an en dash in
+;; "UNICE - Union of ...", and every Portuguese page is full of accents. An
+;; incomplete decoder does not weaken this check, it inverts it: the verbatim
+;; span of a page that IS serving the claim comes back not-found, which is
+;; exactly how a fabricated citation looks.
+(def ^:private named-entities
+  {"nbsp" " " "quot" "\"" "apos" "'" "lt" "<" "gt" ">"
+   "aacute" "á" "eacute" "é" "iacute" "í" "oacute" "ó" "uacute" "ú"
+   "Aacute" "Á" "Eacute" "É" "Iacute" "Í" "Oacute" "Ó" "Uacute" "Ú"
+   "agrave" "à" "egrave" "è" "igrave" "ì" "ograve" "ò" "ugrave" "ù"
+   "acirc" "â" "ecirc" "ê" "icirc" "î" "ocirc" "ô" "ucirc" "û"
+   "auml" "ä" "euml" "ë" "iuml" "ï" "ouml" "ö" "uuml" "ü"
+   "ntilde" "ñ" "atilde" "ã" "otilde" "õ" "ccedil" "ç" "Ccedil" "Ç"
+   "Atilde" "Ã" "Otilde" "Õ" "Acirc" "Â" "Ecirc" "Ê" "Ocirc" "Ô"
+   "sect" "§" "deg" "°" "middot" "·" "pound" "£" "euro" "€"
+   "laquo" "«" "raquo" "»" "bdquo" "„" "ldquo" "“" "rdquo" "”"
+   "lsquo" "‘" "rsquo" "’" "sbquo" "‚"
+   "ndash" "–" "mdash" "—" "hellip" "…"})
+
+(defn- decode-entities
+  "HTML entities -> characters. `&amp;` is decoded LAST, so a document that
+   literally writes `&amp;ndash;` keeps saying `&ndash;` rather than silently
+   becoming a dash."
+  [s]
+  (-> s
+      (str/replace #"&#(\d+);" (fn [[_ d]] (js/String.fromCodePoint (js/parseInt d 10))))
+      (str/replace #"&#[xX]([0-9a-fA-F]+);" (fn [[_ h]] (js/String.fromCodePoint (js/parseInt h 16))))
+      (str/replace #"&([a-zA-Z][a-zA-Z0-9]{1,9});" (fn [[whole nm]] (get named-entities nm whole)))
+      (str/replace #"&amp;" "&")))
+
+(defn- fetch-text
+  "Returns [status text]. nil text means the body arrived but this run could
+   not turn it into text -- a refusal, not a finding."
+  [url]
+  (let [tmp (path/join (os/tmpdir) (str "cip-prt-src-" (hash url)))
+        status (try (str/trim (str (cp/execFileSync
+                                    "curl" #js ["-sS" "-L" "--max-time" "120"
+                                                "-A" ua "-o" tmp "-w" "%{http_code}" url]
+                                    #js {:encoding "utf8"})))
+                    (catch :default e (str "curl-failed: " (.-message e))))
+        body (try (fs/readFileSync tmp) (catch :default _ nil))
+        text (when body
+               (-> (.toString body "utf8")
+                   (str/replace #"(?is)<(script|style|noscript)[^>]*>.*?</\1>" " ")
+                   (str/replace #"(?s)<[^>]+>" " ")
+                   decode-entities))]
+    (try (fs/unlinkSync tmp) (catch :default _ nil))
+    [status (when text (str/trim (str/replace text #"\s+" " ")))]))
+
+(defn- norm [s] (str/trim (str/replace (str s) #"\s+" " ")))
+
+(defn- nearest-preceding-year
+  "The last 4-digit year standing before `quote` in `text`. This is what a
+   reader does with a timeline: the line belongs to the heading above it."
+  [text quote]
+  (let [i (str/index-of text quote)]
+    (when i
+      (let [before (subs text 0 i)
+            years (re-seq #"\b(1[89]\d{2}|20\d{2})\b" before)]
+        (when (seq years) (first (last years)))))))
+
+(defn- date-parts [d]
+  (let [[y m day] (str/split (str d) #"-")] [y m day]))
+
+(defn- month-word-in?
+  "Does `hay` name month `mm` in words, in either language?"
+  [hay mm]
+  (let [i (dec (js/parseInt mm 10))
+        low (str/lower-case hay)]
+    (and (<= 0 i 11)
+         (or (str/includes? low (nth en-months i))
+             (str/includes? low (nth pt-months i))))))
+
+(defn- day-in? [hay dd]
+  (let [n (js/parseInt dd 10)]
+    (boolean (re-find (re-pattern (str "(?:^|[^0-9])" n "(?:[^0-9]|$)")) hay))))
+
+(defn- run-live [data]
+  (when-not (have? "curl") (refuse! "curl is not on PATH"))
+  (let [urls (vec (distinct (remove nil? (concat (map :association-rule/url data)
+                                                 (map :association-rule/corroborating-url data)))))
+        fetched (reduce (fn [m u] (assoc m u (fetch-text u))) {} urls)
+        unreadable (for [[u [status text]] fetched
+                         :when (or (not (re-matches #"2\d\d" status)) (nil? text))]
+                     (str u " -> status=" status
+                          (when (nil? text) " (body could not be turned into text)")))]
+    (println (str "FETCHED\t" (- (count urls) (count unreadable)) "/" (count urls)))
+    (when (seq unreadable)
+      ;; Every quote check below would report "not found", which reads exactly
+      ;; like a fabricated citation. Refuse rather than accuse the catalog.
+      (refuse! (str "could not read " (count unreadable) " of " (count urls)
+                    " sources:\n  " (str/join "\n  " unreadable))))
+    (mapcat
+     (fn [e]
+       (let [id (:association-rule/id e)
+             u (:association-rule/url e)
+             q (norm (:association-rule/source-quote e))
+             [_ text] (get fetched u)
+             curl (:association-rule/corroborating-url e)
+             cq (when curl (norm (:association-rule/corroborating-quote e)))
+             [_ ctext] (when curl (get fetched curl))
+             basis (:association-rule/date-basis e)
+             date (:association-rule/established-date e)
+             [y m d] (date-parts date)
+             ;; the span the date is claimed to be readable out of
+             ;; the span the month/day precision is claimed to be readable out of
+             date-hay (case basis
+                        :in-quote q
+                        :in-quote-under-year-heading q
+                        :corroborating-quote cq
+                        nil)
+             ;; ... and the span the YEAR is claimed to come from, which for a
+             ;; timeline is the heading, not the sentence.
+             year-in-hay? (not (contains? heading-year-bases basis))]
+         (concat
+          (when-not (str/includes? text q)
+            [[:quote-not-in-source (str id ": :source-quote is not at " u "\n      quote: " q)]])
+          (when (and cq (not (str/includes? (str ctext) cq)))
+            [[:corroborating-quote-not-in-source
+              (str id ": :corroborating-quote is not at " curl "\n      quote: " cq)]])
+          ;; The year, from wherever this entry says it comes from.
+          (when (and date (contains? heading-year-bases basis) (str/includes? text q))
+            (let [near (nearest-preceding-year text q)]
+              (cond
+                (nil? near)
+                [[:no-year-heading
+                  (str id ": :date-basis is " basis " but no year stands before the "
+                       "quote at " u)]]
+                (not= near y)
+                [[:year-heading-mismatch
+                  (str id ": records " date " but the nearest year heading above the "
+                       "quote at " u " is " near)]])))
+          (when (and date date-hay year-in-hay? (not (str/includes? date-hay y)))
+            [[:year-not-in-cited-span
+              (str id ": records " date " with :date-basis " basis
+                   ", but " y " does not appear in that span")]])
+          ;; Month and day precision has to come from words on the page, not
+          ;; from the entry. This is the check that catches a real date
+          ;; silently gaining precision it was never sourced at.
+          (when (and m date-hay (not (month-word-in? date-hay m)))
+            [[:month-not-in-cited-span
+              (str id ": records month " m " of " date " but the cited span names no "
+                   "such month")]])
+          (when (and d date-hay (not (day-in? date-hay d)))
+            [[:day-not-in-cited-span
+              (str id ": records day " d " of " date " but the cited span has no such day")]])
+          (when (and (or m d) (nil? date-hay))
+            [[:precision-without-readable-span
+              (str id ": records " date " at finer than year precision, but "
+                   ":date-basis " basis " names no span to read it out of")]]))))
+     data)))
+
+;; --------------------------------------------------------------------- main
+
+(let [[txt data] (read-catalog)
+      findings (concat (structural data) (when live? (run-live data)))]
+  (println (str "SCANNED\t" (count data) " entries, "
+                (count (re-seq #"https?://" txt)) " citations, "
+                (count (distinct (remove nil? (concat (map :association-rule/url data)
+                                                      (map :association-rule/corroborating-url data)))))
+                " distinct sources"
+                (if live? ", live" ", structural only")))
+  (doseq [[tag msg] findings] (println (str "  [" (name tag) "] " msg)))
+  (if (seq findings)
+    (do (println (str (count findings) " finding(s)")) (.exit js/process 1))
+    (do (println "ok") (.exit js/process 0))))

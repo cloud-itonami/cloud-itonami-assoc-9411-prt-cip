@@ -8,7 +8,7 @@
   instead whether every entry can still show where it came from."
   (:require [clojure.test :refer [deftest is testing]]
             [clojure.edn :as edn]
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [association.facts :as facts]))
 
 (def data (edn/read-string (slurp "data/datascript-tx.edn")))

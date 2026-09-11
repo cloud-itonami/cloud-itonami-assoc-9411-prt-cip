@@ -28,8 +28,8 @@ decoration:
 > only for its status code can rot with nothing to show for it.
 
 ```bash
-nbb scripts/verify-catalog.cljs          # structural only, offline
-nbb scripts/verify-catalog.cljs --live   # fetch every citation; check every
+kbb --backend sci scripts/verify-catalog.cljk          # structural only, offline
+kbb --backend sci scripts/verify-catalog.cljk --live   # fetch every citation; check every
                                          # span and every recorded date
 ```
 
@@ -124,7 +124,7 @@ cross-repo DataScript query.
 - `src/association_facts.kotoba` — **generated** by
   `scripts/gen-kotoba-port.cljs`; reaches the Kotoba oracle, wasm and both
   native ISAs, which the `.cljc` cannot. Do not hand-edit —
-  `nbb scripts/gen-kotoba-port.cljs --check` will say if someone did.
+  `kbb --backend sci scripts/gen-kotoba-port.cljk --check` will say if someone did.
 - `schema/association-rule.edn` — DataScript schema.
 
 `test/association_facts_kotoba_parity_test.clj` compares the `.cljc` and

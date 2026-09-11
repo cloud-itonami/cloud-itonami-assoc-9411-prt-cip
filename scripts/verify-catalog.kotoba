@@ -1,8 +1,8 @@
-#!/usr/bin/env nbb
+#!/usr/bin/env kbb
 ;; scripts/verify-catalog.cljs — check the CIP-PRT catalog against its sources.
 ;;
-;;   nbb scripts/verify-catalog.cljs            structural only (offline)
-;;   nbb scripts/verify-catalog.cljs --live     also fetch every citation, and
+;;   kbb --backend sci scripts/verify-catalog.cljk            structural only (offline)
+;;   kbb --backend sci scripts/verify-catalog.cljk --live     also fetch every citation, and
 ;;                                              require every quote and every
 ;;                                              recorded date to be in it
 ;;
